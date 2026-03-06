@@ -263,6 +263,103 @@ def create_makespan_comparison(instance_id, ls_loads, lpt_loads):
     return fig
 
 
+def compute_memory_first_instances():
+    """
+    Misst den Speicherbedarf der ersten Instanz aus small (n=10) und
+    medium (n=200) fuer LS und LPT direkt via tracemalloc.
+    """
+    results = []
+    for filename, label in [("small_instances.yaml", "small"), ("medium_instances.yaml", "medium")]:
+        try:
+            with open(filename, "r") as f:
+                instances = list(yaml.safe_load_all(f))
+            entry = instances[0]
+            j = entry["jobs"]
+            m = entry["num_machines"]
+
+            tracemalloc.start()
+            _scheduling_kernel(j, m)
+            _, ls_mem = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+
+            sorted_j = sorted(j, reverse=True)
+            tracemalloc.start()
+            _scheduling_kernel(sorted_j, m)
+            _, lpt_mem = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+
+            results.append({
+                "n":       len(j),
+                "ls_mem":  ls_mem  / 1024,
+                "lpt_mem": lpt_mem / 1024,
+                "label":   f"{label} – Instanz {entry['id']}",
+            })
+        except FileNotFoundError:
+            pass
+    return results
+
+
+def create_memory_comparison_chart(results):
+    """
+    Liniendiagramm mit masstabtreuer X-Achse:
+    Messpunkte bei n=10 und n=200, verbunden durch eine gerade Linie.
+    """
+    import numpy as np
+
+    ns       = [r["n"]       for r in results]
+    ls_mems  = [r["ls_mem"]  for r in results]
+    lpt_mems = [r["lpt_mem"] for r in results]
+    labels   = [r["label"]   for r in results]
+
+    x_line = np.linspace(min(ns), max(ns), 200)
+    ls_line  = np.interp(x_line, ns, ls_mems)
+    lpt_line = np.interp(x_line, ns, lpt_mems)
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=x_line, y=ls_line,
+        mode="lines",
+        name="List Scheduling (Linie)",
+        line=dict(color="steelblue", width=2, dash="solid"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=x_line, y=lpt_line,
+        mode="lines",
+        name="LPT (Linie)",
+        line=dict(color="mediumseagreen", width=2, dash="solid"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=ns, y=ls_mems,
+        mode="markers+text",
+        name="List Scheduling (Messung)",
+        marker=dict(color="steelblue", size=12, symbol="circle"),
+        text=[f"{v:.3f} KB" for v in ls_mems],
+        textposition="top center",
+        hovertext=labels,
+    ))
+    fig.add_trace(go.Scatter(
+        x=ns, y=lpt_mems,
+        mode="markers+text",
+        name="LPT (Messung)",
+        marker=dict(color="mediumseagreen", size=12, symbol="diamond"),
+        text=[f"{v:.3f} KB" for v in lpt_mems],
+        textposition="bottom center",
+        hovertext=labels,
+    ))
+
+    fig.update_layout(
+        title="Speicherbedarf: gemessene Werte bei n=10 und n=200 (masstabtreu)",
+        xaxis_title="Anzahl Jobs (n)",
+        yaxis_title="Speicher (KB)",
+        xaxis=dict(range=[0, max(ns) * 1.1]),
+        yaxis=dict(range=[0, max(lpt_mems) * 1.3]),
+        height=460,
+        legend=dict(orientation="h", y=-0.3),
+    )
+    return fig
+
+
 st.set_page_config(page_title="Scheduling-Algorithmen", layout="wide")
 st.title("Scheduling-Algorithmen: List Scheduling & LPT")
 st.markdown(
@@ -398,17 +495,17 @@ st.sidebar.header("Instanz laden")
 
 source = st.sidebar.radio(
     "Datenquelle waehlen:",
-    ["medium_instances.yaml", "Eigene YAML-Datei hochladen"],
+    ["small_instances.yaml", "medium_instances.yaml", "Eigene YAML-Datei hochladen"],
 )
 
 data = None
 
-if source == "medium_instances.yaml":
+if source in ("small_instances.yaml", "medium_instances.yaml"):
     try:
-        with open("medium_instances.yaml", "r") as f:
+        with open(source, "r") as f:
             data = parse_yaml_instances(f.read())
     except FileNotFoundError:
-        st.error("Datei 'medium_instances.yaml' nicht gefunden.")
+        st.error(f"Datei '{source}' nicht gefunden.")
 else:
     uploaded = st.sidebar.file_uploader("YAML-Datei hochladen", type=["yaml", "yml"])
     if uploaded is not None:
@@ -496,5 +593,26 @@ if data:
                 f"List Scheduling liefert hier einen besseren Makespan "
                 f"({ls_makespan} vs. {lpt_makespan})."
             )
+    st.divider()
+    st.subheader("Speichervergleich: erste Instanz aus small vs. medium")
+    st.markdown(
+        "Vergleich des gemessenen Speicherbedarfs der **ersten Instanz** aus "
+        "`small_instances.yaml` und `medium_instances.yaml` — "
+        "jeweils fuer List Scheduling und LPT."
+    )
+    if st.button("Berechnen und vergleichen"):
+        with st.spinner("Erste Instanzen aus beiden Dateien werden berechnet..."):
+            mem_results = compute_memory_first_instances()
+        if mem_results:
+            fig_mem = create_memory_comparison_chart(mem_results)
+            st.plotly_chart(fig_mem, use_container_width=True)
+            df_mem = pd.DataFrame(mem_results).rename(columns={
+                "label":   "Instanz",
+                "ls_mem":  "LS Speicher (KB)",
+                "lpt_mem": "LPT Speicher (KB)",
+            })
+            st.dataframe(df_mem, use_container_width=True, hide_index=True)
+        else:
+            st.warning("YAML-Dateien nicht gefunden.")
 else:
     st.info("Bitte eine Instanz-Datei laden, um die Algorithmen auszufuehren.")
